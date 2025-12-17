@@ -1,0 +1,7 @@
+transformers
+decord
+accelerate
+pandas
+numpy
+scikit-learn
+tqdm

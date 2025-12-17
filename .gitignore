@@ -1,0 +1,31 @@
+# nvenv/
+# __pycache__/
+# *.pt
+# *.ckpt
+# *.log
+# data/
+# clips/
+# *.mp4
+# virtual environments
+nvenv/
+venv/
+
+# python cache
+__pycache__/
+*.pyc
+
+# logs & checkpoints
+*.log
+*.pt
+*.ckpt
+*.bin
+
+# datasets & csv (never push)
+datasets/
+csv/
+*.mp4
+
+# OS junk
+.DS_Store
+Thumbs.db
+
