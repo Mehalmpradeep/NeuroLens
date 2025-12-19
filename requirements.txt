@@ -1,7 +1,12 @@
-transformers
-decord
-accelerate
-pandas
-numpy
-scikit-learn
-tqdm
+# Core ML / VideoMAE
+transformers==4.36.2
+accelerate==0.25.0
+
+# Video loading
+decord==0.6.0
+
+# Data handling
+pandas>=1.5,<2.1
+numpy>=1.23,<2.0
+scikit-learn>=1.2,<1.5
+tqdm>=4.64

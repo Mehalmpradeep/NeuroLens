@@ -1,31 +1,50 @@
-# nvenv/
-# __pycache__/
-# *.pt
-# *.ckpt
-# *.log
-# data/
-# clips/
-# *.mp4
-# virtual environments
+# ========================================
+# 1. Virtual Environments (DO NOT UPLOAD)
+# ========================================
 nvenv/
 venv/
+.env/
 
-# python cache
+# ========================================
+# 2. Python Cache
+# ========================================
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# logs & checkpoints
+# ========================================
+# 3. Logs & Checkpoints (local only)
+# ========================================
 *.log
-*.pt
+*.pt              # training checkpoints
 *.ckpt
 *.bin
+last_checkpoint.pt
 
-# datasets & csv (never push)
+# ========================================
+# 4. Model Weights (uploaded to HF, not GitHub)
+checkpoints/
+*.safetensors
+
+# ========================================
+# 5. Datasets & CSV (never upload)
 datasets/
 csv/
 *.mp4
+*.avi
+*.mov
+*.mkv
 
-# OS junk
+# ========================================
+# 6. Executables (DO NOT upload)
+*.exe
+*.bat
+*.dll
+
+# ========================================
+# 7. OS Junk / Editor Files
 .DS_Store
 Thumbs.db
-
+.vscode/
+.idea/

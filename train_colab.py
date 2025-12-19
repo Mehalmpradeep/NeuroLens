@@ -1,46 +1,51 @@
 # ===============================
-# 0. MOUNT DRIVE
-# ===============================
-from google.colab import drive
-drive.mount('/content/drive')
-
-# ===============================
-# 1. INSTALL DEPENDENCIES
-# ===============================
-print("🔧 Installing dependencies...")
-!pip install -q transformers decord accelerate pandas scikit-learn tqdm
-print("✅ Dependencies installed")
-
-# ===============================
-# 2. GPU CHECK
+# 1. GPU CHECK
 # ===============================
 import torch
-print("🚀 GPU available:", torch.cuda.is_available())
-print("🚀 GPU name:", torch.cuda.get_device_name(0))
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-# ===============================
-# 3. IMPORTS
-# ===============================
+import os
 import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
 from decord import VideoReader, cpu
-from sklearn.metrics import accuracy_score
 from tqdm import tqdm
 
+print("🚀 GPU available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("🚀 GPU name:", torch.cuda.get_device_name(0))
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # ===============================
-# 4. LOAD CSVs (NO SPLIT)
+# 2. CONFIG
 # ===============================
-TRAIN_CSV = "/content/drive/MyDrive/Neurolens/csv/all_train.csv"
-VAL_CSV   = "/content/drive/MyDrive/Neurolens/csv/all_val.csv"
+BASE_DIR = "D:/NeuroLens"
+
+TRAIN_CSV = f"{BASE_DIR}/csv/all_train.csv"
+VAL_CSV   = f"{BASE_DIR}/csv/all_val.csv"
+DATASET_ROOT = f"{BASE_DIR}/datasets"
 
 VIDEO_COL = "path"
 LABEL_COL = "label"
 
-print("📄 Loading CSVs...")
+CHECKPOINT_DIR = f"{BASE_DIR}/checkpoints"
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+RESUME_CHECKPOINT = f"{CHECKPOINT_DIR}/last_checkpoint.pt"
+
+NUM_FRAMES = 16
+BATCH_SIZE = 2
+EPOCHS = 10
+LR = 2e-5
+NUM_WORKERS = 0
+
+# 🔹 EARLY STOPPING
+PATIENCE = 3
+no_improve_epochs = 0
+
+# ===============================
+# 3. LOAD CSVs
+# ===============================
 train_df = pd.read_csv(TRAIN_CSV)
 val_df   = pd.read_csv(VAL_CSV)
 
@@ -48,13 +53,14 @@ print(f"✅ Train samples: {len(train_df)}")
 print(f"✅ Val samples  : {len(val_df)}")
 
 # ===============================
-# 5. DATASET CLASS (CORRECT & SAFE)
+# 4. DATASET CLASS
 # ===============================
 class NeuroLensDataset(Dataset):
-    def __init__(self, csv_file, processor, num_frames=16):
+    def __init__(self, csv_file, processor, num_frames=16, max_retries=5):
         self.data = pd.read_csv(csv_file)
         self.processor = processor
         self.num_frames = num_frames
+        self.max_retries = max_retries
 
     def __len__(self):
         return len(self.data)
@@ -64,17 +70,20 @@ class NeuroLensDataset(Dataset):
             vr = VideoReader(path, ctx=cpu(0))
             if len(vr) < self.num_frames:
                 return None
-
-            indices = np.linspace(0, len(vr) - 1, self.num_frames).astype(int)
-            return vr.get_batch(indices).asnumpy()
-        except Exception:
+            idx = np.linspace(0, len(vr) - 1, self.num_frames).astype(int)
+            return vr.get_batch(idx).asnumpy()
+        except:
             return None
 
     def __getitem__(self, idx):
-        while True:
+        for _ in range(self.max_retries):
             row = self.data.iloc[idx]
-            frames = self.load_video(row[VIDEO_COL])
+            video_path = row[VIDEO_COL]
 
+            if not os.path.isabs(video_path):
+                video_path = os.path.join(DATASET_ROOT, video_path)
+
+            frames = self.load_video(video_path)
             if frames is not None:
                 inputs = self.processor(list(frames), return_tensors="pt")
                 inputs = {k: v.squeeze(0) for k, v in inputs.items()}
@@ -83,12 +92,13 @@ class NeuroLensDataset(Dataset):
 
             idx = (idx + 1) % len(self.data)
 
+        raise RuntimeError("Too many corrupted videos")
+
 print("✅ Dataset class ready")
 
 # ===============================
-# 6. MODEL & PROCESSOR
+# 5. MODEL
 # ===============================
-print("🤖 Loading VideoMAE...")
 processor = VideoMAEImageProcessor.from_pretrained("MCG-NJU/videomae-base")
 
 model = VideoMAEForVideoClassification.from_pretrained(
@@ -100,55 +110,54 @@ model = VideoMAEForVideoClassification.from_pretrained(
 print("✅ Model loaded")
 
 # ===============================
-# 7. DATASETS & DATALOADERS
+# 6. DATALOADERS
 # ===============================
-train_dataset = NeuroLensDataset(TRAIN_CSV, processor)
-val_dataset   = NeuroLensDataset(VAL_CSV, processor)
-
 train_loader = DataLoader(
-    train_dataset,
-    batch_size=2,
+    NeuroLensDataset(TRAIN_CSV, processor, NUM_FRAMES),
+    batch_size=BATCH_SIZE,
     shuffle=True,
-    num_workers=2,
+    num_workers=NUM_WORKERS,
     pin_memory=True
 )
 
 val_loader = DataLoader(
-    val_dataset,
-    batch_size=2,
+    NeuroLensDataset(VAL_CSV, processor, NUM_FRAMES),
+    batch_size=BATCH_SIZE,
     shuffle=False,
-    num_workers=2,
+    num_workers=NUM_WORKERS,
     pin_memory=True
 )
 
 print("✅ DataLoaders ready")
 
 # ===============================
-# 8. OPTIMIZER
+# 7. OPTIMIZER & AMP
 # ===============================
-optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
+optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
 
 # ===============================
-# 9. TRAIN & VALIDATE FUNCTIONS
+# 8. TRAIN & EVAL
 # ===============================
-def train_one_epoch(model, loader, optimizer):
+def train_one_epoch(model, loader):
     model.train()
-    total_loss = 0
+    total_loss = 0.0
 
-    progress = tqdm(loader, desc="Training", leave=False)
-    for batch in progress:
+    for batch in tqdm(loader, desc="Training", leave=False):
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
 
-        optimizer.zero_grad()
-        outputs = model(pixel_values=pixel_values, labels=labels)
-        loss = outputs.loss
+        optimizer.zero_grad(set_to_none=True)
 
-        loss.backward()
-        optimizer.step()
+        with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            outputs = model(pixel_values=pixel_values, labels=labels)
+            loss = outputs.loss
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item()
-        progress.set_postfix(loss=f"{loss.item():.4f}")
 
     return total_loss / len(loader)
 
@@ -156,17 +165,16 @@ def train_one_epoch(model, loader, optimizer):
 @torch.no_grad()
 def evaluate(model, loader):
     model.eval()
-    total_loss = 0
-    correct = 0
-    total = 0
+    total_loss, correct, total = 0, 0, 0
 
     for batch in tqdm(loader, desc="Validating", leave=False):
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
 
-        outputs = model(pixel_values=pixel_values, labels=labels)
-        total_loss += outputs.loss.item()
+        with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            outputs = model(pixel_values=pixel_values, labels=labels)
 
+        total_loss += outputs.loss.item()
         preds = outputs.logits.argmax(dim=1)
         correct += (preds == labels).sum().item()
         total += labels.size(0)
@@ -174,17 +182,29 @@ def evaluate(model, loader):
     return total_loss / len(loader), correct / total
 
 # ===============================
-# 10. TRAIN LOOP
+# 9. RESUME LOGIC
 # ===============================
-EPOCHS = 5
-best_val_acc = 0
+start_epoch = 0
+best_val_acc = 0.0
 
+if os.path.exists(RESUME_CHECKPOINT):
+    print("🔄 Resuming from checkpoint")
+    ckpt = torch.load(RESUME_CHECKPOINT, map_location=device)
+    model.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    scaler.load_state_dict(ckpt["scaler"])
+    start_epoch = ckpt["epoch"] + 1
+    best_val_acc = ckpt["best_val_acc"]
+
+# ===============================
+# 10. TRAIN LOOP (WITH EARLY STOPPING)
+# ===============================
 print("🔥 Training started")
 
-for epoch in range(EPOCHS):
-    print(f"\n🟢 Epoch {epoch+1}/{EPOCHS}")
+for epoch in range(start_epoch, EPOCHS):
+    print(f"\n🟢 Epoch {epoch + 1}/{EPOCHS}")
 
-    train_loss = train_one_epoch(model, train_loader, optimizer)
+    train_loss = train_one_epoch(model, train_loader)
     val_loss, val_acc = evaluate(model, val_loader)
 
     print(f"📉 Train Loss: {train_loss:.4f}")
@@ -193,8 +213,26 @@ for epoch in range(EPOCHS):
 
     if val_acc > best_val_acc:
         best_val_acc = val_acc
-        model.save_pretrained("/content/drive/MyDrive/Neurolens/final_videomae")
-        processor.save_pretrained("/content/drive/MyDrive/Neurolens/final_videomae")
+        no_improve_epochs = 0
+        model.save_pretrained(CHECKPOINT_DIR)
+        processor.save_pretrained(CHECKPOINT_DIR)
         print("💾 Best model saved")
+    else:
+        no_improve_epochs += 1
+        print(f"⚠️ No improvement for {no_improve_epochs} epoch(s)")
+
+    torch.save({
+        "epoch": epoch,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict(),
+        "best_val_acc": best_val_acc
+    }, RESUME_CHECKPOINT)
+
+    print("💾 Checkpoint saved")
+
+    if no_improve_epochs >= PATIENCE:
+        print("⏹️ Early stopping triggered")
+        break
 
 print("🏁 Training complete")
