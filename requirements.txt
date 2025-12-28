@@ -1,6 +1,7 @@
 # Core ML / VideoMAE
 transformers==4.36.2
 accelerate==0.25.0
+torch==2.1.2
 
 # Video loading
 decord==0.6.0
@@ -10,3 +11,19 @@ pandas>=1.5,<2.1
 numpy>=1.23,<2.0
 scikit-learn>=1.2,<1.5
 tqdm>=4.64
+
+# -------------------------
+# Dashboard / Frontend
+# -------------------------
+streamlit==1.30.0
+opencv-python==4.8.1.78
+pillow>=9.5,<11.0
+matplotlib>=3.7,<3.9
+seaborn>=0.12,<0.14
+
+# -------------------------
+# Environment variables
+# -------------------------
+python-dotenv==1.0.1
+
+streamlit-webrtc==0.47.7
